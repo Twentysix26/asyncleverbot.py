@@ -1,18 +1,9 @@
 """An unofficial library to access the Cleverbot API."""
-from __future__ import (absolute_import, division, print_function,
-                        unicode_literals)
-from builtins import str  # pylint: disable=redefined-builtin
-from builtins import object  # pylint: disable=redefined-builtin
-
 import collections
 import hashlib
-import requests
-from requests.compat import urlencode
-from future.backports.html import parser
-
-# Only use the instance method `unescape` of entity_parser. (I wish it was a
-# static method or public function; it never uses `self` anyway)
-entity_parser = parser.HTMLParser()
+import aiohttp
+from urllib.parse import urlencode
+from html import unescape
 
 
 class Cleverbot(object):
@@ -22,12 +13,12 @@ class Cleverbot(object):
 
        >>> from cleverbot import Cleverbot
        >>> cb = Cleverbot()
-       >>> cb.ask("Hi. How are you?")
+       >>> await cb.ask("Hi. How are you?")
        "I'm good, thanks. How are you?"
     """
     HOST = "www.cleverbot.com"
     PROTOCOL = "http://"
-    RESOURCE = "/webservicemin?uc=321&"
+    RESOURCE = "/webservicemin?uc=3210&botapi=asyncleverbot-py"
     API_URL = PROTOCOL + HOST + RESOURCE
 
     headers = {
@@ -78,12 +69,9 @@ class Cleverbot(object):
 
         # the log of our conversation with Cleverbot
         self.conversation = []
+        self.jar = aiohttp.CookieJar(unsafe=True)
 
-        # get the main page to get a cookie (see bug #13)
-        self.session = requests.Session()
-        self.session.get(Cleverbot.PROTOCOL + Cleverbot.HOST)
-
-    def ask(self, question):
+    async def ask(self, question):
         """Asks Cleverbot a question.
 
         Maintains message history.
@@ -96,12 +84,12 @@ class Cleverbot(object):
         self.data['stimulus'] = question
 
         # Connect to Cleverbot's API and remember the response
-        resp = self._send()
+        resp = await self._send()
 
         # Add the current question to the conversation log
         self.conversation.append(question)
 
-        parsed = self._parse(resp.text)
+        parsed = await self._parse(resp)
 
         # Set data as appropriate
         if self.data['sessionid'] != '':
@@ -112,7 +100,7 @@ class Cleverbot(object):
 
         return parsed['answer'].encode('latin-1').decode('utf-8')
 
-    def _send(self):
+    async def _send(self):
         """POST the user's question and all required information to the
         Cleverbot API
 
@@ -124,30 +112,36 @@ class Cleverbot(object):
         TODO: Order is not guaranteed when urlencoding dicts. This hasn't been
         a problem yet, but let's look into ordered dicts or tuples instead.
         """
-        # Set data as appropriate
-        if self.conversation:
-            linecount = 1
-            for line in reversed(self.conversation):
-                linecount += 1
-                self.data['vText' + str(linecount)] = line
-                if linecount == 8:
-                    break
+        async with aiohttp.ClientSession(cookie_jar=self.jar) as session:
 
-        # Generate the token
-        enc_data = urlencode(self.data)
-        digest_txt = enc_data[9:35]
-        token = hashlib.md5(digest_txt.encode('utf-8')).hexdigest()
-        self.data['icognocheck'] = token
+            if not self.jar.filter_cookies(self.PROTOCOL + self.HOST):
+                # get the main page to get a cookie (see bug #13)
+                await session.get(self.PROTOCOL + self.HOST)
 
-        # POST the data to Cleverbot's API and return
-        return self.session.post(Cleverbot.API_URL,
-                                 data=self.data,
-                                 headers=Cleverbot.headers)
+            # Set data as appropriate
+            if self.conversation:
+                linecount = 1
+                for line in reversed(self.conversation):
+                    linecount += 1
+                    self.data['vText' + str(linecount)] = line
+                    if linecount == 8:
+                        break
+
+            # Generate the token
+            enc_data = urlencode(self.data)
+            digest_txt = enc_data[9:35]
+            token = hashlib.md5(digest_txt.encode('utf-8')).hexdigest()
+            self.data['icognocheck'] = token
+
+            # POST the data to Cleverbot's API and return
+            async with session.post(Cleverbot.API_URL, data=self.data,
+                                    headers=Cleverbot.headers) as resp:
+                return await resp.text()
 
     @staticmethod
-    def _parse(resp_text):
+    async def _parse(resp_text):
         """Parses Cleverbot's response"""
-        resp_text = entity_parser.unescape(resp_text)
+        resp_text = unescape(resp_text)
 
         parsed = [
             item.split('\r') for item in resp_text.split('\r\r\r\r\r\r')[:-1]
